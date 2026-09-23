@@ -130,6 +130,12 @@ export const EXTERNAL_LINKS: readonly ExternalLink[] = [
     url: 'https://docs.useveilapp.xyz',
   },
   {
+    key: 'privacy',
+    label: 'Privacy Guide',
+    description: 'What "private" means: hidden pool transfers vs. public deposits',
+    url: 'https://docs.useveilapp.xyz/privacy',
+  },
+  {
     key: 'source',
     label: 'Source code',
     description: 'Contracts, SDK, and apps on GitHub',

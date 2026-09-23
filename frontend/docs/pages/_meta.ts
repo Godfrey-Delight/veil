@@ -15,6 +15,7 @@ export default {
   guides: 'Guides',
   cookbook: 'Cookbook',
   'agent-integration': 'Agent Integration',
+  privacy: 'What "Private" Means',
   security: 'Security',
   'threat-model': 'Threat Model',
   papers: {
