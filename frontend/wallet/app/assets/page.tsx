@@ -186,7 +186,24 @@ export default function AssetsPage() {
             trustlines.map((line) => (
               <div key={`${line.code}-${line.issuer}`} className="card" style={trustlineRowStyle}>
                 <div style={{ minWidth: 0 }}>
-                  <p style={{ fontWeight: 600, color: 'var(--off-white)' }}>{line.code}</p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <p style={{ fontWeight: 600, color: 'var(--off-white)' }}>{line.code}</p>
+                    {line.code === 'USDY' && (
+                      <a
+                        href="/assets/usdy"
+                        style={{
+                          fontSize: '0.6875rem',
+                          color: 'var(--gold)',
+                          textDecoration: 'none',
+                          border: '1px solid rgba(253,218,36,0.3)',
+                          padding: '1px 6px',
+                          borderRadius: '4px',
+                        }}
+                      >
+                        Explain USDY ℹ
+                      </a>
+                    )}
+                  </div>
                   <p style={{ ...mutedTextStyle, fontFamily: 'monospace', fontSize: '0.7rem', wordBreak: 'break-all' }}>
                     {line.issuer}
                   </p>
