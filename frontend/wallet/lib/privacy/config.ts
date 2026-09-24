@@ -1,78 +1,132 @@
-import type { VeilNetworkName } from '../network'
-
 /**
- * Stellar Private Payments (SPP) configuration and feature flags.
+ * The privacy feature flag and the per-network Stellar Private Payments (SPP)
+ * config (V131).
  *
- * Source: NethermindEth/stellar-private-payments deployments/testnet/deployments.json
- * Upstream commit: 8d2c49a (2026-08)
+ * SPP is an unaudited developer preview that runs on testnet only — "not yet
+ * approved for mainnet". Every later issue in the privacy batch reads two
+ * things from this module and nowhere else:
  *
- * Ground rules:
- * - Testnet only: unaudited developer preview, strictly locked out on mainnet.
- * - Canonical pools only: shared pool for XLM and EURC.
+ *   - {@link isPrivacyEnabled} — the single switch that hides the feature;
+ *   - {@link getSppConfig} — the pool, verifier, ASP and registry contract
+ *     IDs for the active network.
+ *
+ * The network is resolved per call rather than captured at import time, so the
+ * runtime network switch (`setActiveNetwork` in `lib/network.ts`) takes effect
+ * without module-level state going stale.
  */
 
-export interface SppPoolConfig {
-  assetSymbol: 'XLM' | 'EURC'
-  poolContractId: string
-  policy: 'block-list' | 'allow-and-block-list'
+import { getNetworkName, type VeilNetworkName } from '../network'
+
+/**
+ * Build-time switch for the privacy feature, off unless a build opts in with
+ * `NEXT_PUBLIC_PRIVACY_FEATURE_FLAG=1` (or `true`). `NEXT_PUBLIC_` is spelled
+ * out literally for the same reason `lib/multisigConfig.ts` spells its
+ * variables out: Next.js inlines `NEXT_PUBLIC_*` into the client bundle by
+ * matching the literal member expression, and a computed key is not
+ * substituted.
+ */
+function privacyFlagOn(): boolean {
+  return (
+    process.env.NEXT_PUBLIC_PRIVACY_FEATURE_FLAG === '1' ||
+    process.env.NEXT_PUBLIC_PRIVACY_FEATURE_FLAG === 'true'
+  )
 }
 
-export interface SppNetworkConfig {
-  network: VeilNetworkName
+/**
+ * Whether the privacy feature is available for `network`, defaulting to the
+ * active network.
+ *
+ * Off by default, and unconditionally off on mainnet. SPP is a testnet-only
+ * preview, so an enabled build flag must never become a path to private
+ * payments on mainnet — even a mainnet build that sets it gets `false`.
+ */
+export function isPrivacyEnabled(network: VeilNetworkName = getNetworkName()): boolean {
+  if (network === 'mainnet') return false
+  return privacyFlagOn()
+}
+
+/** One entry of SPP's `pools` array in `deployments/testnet/deployments.json`. */
+export type SppPool = {
+  /** `poolContractId` — the pool's own contract. */
+  id: string
+  /** `tokenContractId` — the token contract the pool moves. */
+  tokenContractId: string
+  /** `policyFlags` — the compliance policy the pool was deployed with. */
+  policyFlags: readonly string[]
+  /** `asset.kind` — whether the pool's base asset is native XLM. */
+  assetKind: 'native' | 'soroban'
+  /** `gvkMode`, present only when the pool is global-view-key traceable. */
+  gvkMode?: 'traceable'
+}
+
+/** The SPP deployment the wallet should talk to on one network, if any. */
+export type SppNetworkConfig = {
+  /** `asp_membership` — ASP contract holding the approved-key Merkle tree. */
+  aspMembership: string
+  /** `asp_non_membership` — ASP contract holding the blocked-key tree. */
+  aspNonMembership: string
+  /** `verifiers` — the on-chain Groth16 verifier contracts. */
+  verifiers: {
+    /** `verifiers.B` — block-list / allow-list pools without a global view key. */
+    standard: string
+    /** `verifiers.B_gvk_T` — traceable global-view-key pools. */
+    traceable: string
+  }
+  /** `public_key_registry` — Stellar address → SPP public keys. */
+  publicKeyRegistry: string
+  /** Nethermind's hosted events archive for sync past the 7-day RPC window. */
   bootnodeUrl: string
-  verifierContractId: string
-  aspContractId: string
-  publicKeyRegistryContractId: string
-  pools: Record<string, SppPoolConfig>
-}
-
-export const SPP_TESTNET_CONFIG: SppNetworkConfig = {
-  network: 'testnet',
-  bootnodeUrl: process.env.NEXT_PUBLIC_SPP_BOOTNODE_URL?.trim() || 'https://bootnode.dev-nethermind.xyz',
-  verifierContractId:
-    process.env.NEXT_PUBLIC_SPP_VERIFIER_ID?.trim() ||
-    'CAPL2QHQY5N4T5Y2OZZPXE5I667QZDFGZ763B5M44F35Z6I7QW6M3L2R',
-  aspContractId:
-    process.env.NEXT_PUBLIC_SPP_ASP_ID?.trim() ||
-    'CASP2QHQY5N4T5Y2OZZPXE5I667QZDFGZ763B5M44F35Z6I7QW6M3ASP',
-  publicKeyRegistryContractId:
-    process.env.NEXT_PUBLIC_SPP_REGISTRY_ID?.trim() ||
-    'CPKR2QHQY5N4T5Y2OZZPXE5I667QZDFGZ763B5M44F35Z6I7QW6M3PKR',
-  pools: {
-    XLM: {
-      assetSymbol: 'XLM',
-      poolContractId:
-        process.env.NEXT_PUBLIC_SPP_XLM_POOL_ID?.trim() ||
-        'CD2W5LURV2C2N35N3L4WJ2J53A42L57L2OVRQ6YGL66HQXNDSZ5EXZ4L',
-      policy: 'block-list',
-    },
-    EURC: {
-      assetSymbol: 'EURC',
-      poolContractId:
-        process.env.NEXT_PUBLIC_SPP_EURC_POOL_ID?.trim() ||
-        'CBMRWHTPX4E6B4G6N34W3BHRTRXU4Z7X5PQX3K6325OVT7V7J73WNUVS',
-      policy: 'allow-and-block-list',
-    },
-  },
+  /** `pools` — the canonical pools for this network. */
+  pools: readonly SppPool[]
 }
 
 /**
- * Privacy feature flag.
- * Must be FALSE on mainnet until SPP is fully audited and approved.
+ * SPP contract addresses, copied from SPP's
+ * `deployments/testnet/deployments.json` at upstream commit
+ * `91ba67d659cb50a66ecba7ba42e27f8e686117f4`
+ * (NethermindEth/stellar-private-payments, 2026-09-23 — "redeploy testnet for
+ * the packed storage layout"). Copy the testnet entry again — and bump the
+ * commit hash above with it — whenever SPP redeploys.
+ *
+ * Mainnet has no entry on purpose: SPP is not approved for mainnet, so there is
+ * nothing to point at, and {@link getSppConfig} returning `null` there is how a
+ * screen knows not to offer any of it.
  */
-export function isPrivacyEnabled(network: VeilNetworkName): boolean {
-  if (network === 'mainnet') {
-    return false
-  }
-  return true
+export const SPP_NETWORKS: Partial<Record<VeilNetworkName, SppNetworkConfig>> = {
+  testnet: {
+    aspMembership: 'CAUPZISOB4GWTH22MVKA6MRWJMQRTLUMIGUSBFNJEF32Z6WEY3RFOKGC',
+    aspNonMembership: 'CAFLZKGO3KYKNOBPCVT3APFEWMUBRDBF4EVYK65E6O653WYMX4XH4QYJ',
+    verifiers: {
+      standard: 'CD34JHLNB7AYASRLOTMT6EECBKFMOS356PPP5RPXRO5Y5EA5Y4DIXGTV',
+      traceable: 'CDBA2ZZSVV5VVE4OL2ORCSG2XDN4CD2UPTZIEO7BI32RKRTPFCUF2FMV',
+    },
+    publicKeyRegistry: 'CC6EJCBEULJGHNQQROKLXD6M6IKFW6LN7IHTVUEFQQWZDDLCMNPWXIH4',
+    bootnodeUrl: 'https://bootnode.dev-nethermind.xyz',
+    pools: [
+      {
+        // XLM pool with a block-list policy.
+        id: 'CBEDPYMAEPQ6JR7WKWXRM6CFHHJLKA5RHPRRLSD4UZXZRGNMBXOT2GOT',
+        tokenContractId: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+        policyFlags: ['blocklist'],
+        assetKind: 'native',
+      },
+      {
+        // XLM pool with a block-list policy and a global view key (traceable).
+        id: 'CADS665GRBHOMPE7GY5XYTFT2J5JKRZN6ILYMJ5ZO62GU4YPL3PYIN42',
+        tokenContractId: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+        policyFlags: ['blocklist'],
+        assetKind: 'native',
+        gvkMode: 'traceable',
+      },
+    ],
+  },
+  // mainnet: no entry — see the comment above.
 }
 
-export function getSppConfig(network: VeilNetworkName): SppNetworkConfig | null {
-  if (!isPrivacyEnabled(network)) {
-    return null
-  }
-  if (network === 'testnet') {
-    return SPP_TESTNET_CONFIG
-  }
-  return null
+/**
+ * The SPP config for `network`, or `null` when that network has no deployment
+ * (mainnet). Resolved per call so it tracks the runtime network switch.
+ */
+export function getSppConfig(network: VeilNetworkName = getNetworkName()): SppNetworkConfig | null {
+  return SPP_NETWORKS[network] ?? null
 }
