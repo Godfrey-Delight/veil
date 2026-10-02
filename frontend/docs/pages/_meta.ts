@@ -16,7 +16,7 @@ export default {
   invest: 'Invest Rail & Disclosures',
   cookbook: 'Cookbook',
   'agent-integration': 'Agent Integration',
-  privacy: 'What "Private" Means',
+  voice: 'Voice & Assistants',
   security: 'Security',
   'threat-model': 'Threat Model',
   papers: {
