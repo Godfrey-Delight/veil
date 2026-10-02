@@ -241,7 +241,6 @@ function DashboardPageContent() {
   const recent = transactions.slice(0, 4)
 
   const [multisigAvailable, setMultisigAvailable] = useState(false)
-  const [privacyEnabled, setPrivacyEnabled] = useState(false)
 
   const horizonNextRef = useRef<(() => Promise<any>) | null>(null)
 
@@ -255,7 +254,6 @@ function DashboardPageContent() {
     // chip there would just bounce the user straight back here. Resolved after
     // mount because the active network lives in localStorage.
     setMultisigAvailable(isMultisigAvailable())
-    setPrivacyEnabled(isPrivacyEnabled(getNetworkName()))
 
     // Establish the fee-payer for this session (idempotent, fire-and-forget).
     // PRF wallets keep the seed in sessionStorage only — never copied to

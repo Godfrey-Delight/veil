@@ -84,15 +84,21 @@ Even though deposit and withdrawal transactions are individually visible on-chai
 
 ---
 
-## 3. Selective Disclosure ("Prove this Payment")
+## 3. Selective Disclosure ("Prove this Payment") — planned, not yet available
+
+<Callout type="warning">
+  **Not built yet.** Veil cannot generate a disclosure proof today. This section
+  describes what the Stellar Private Payments design allows and what we intend to
+  ship — read it as a roadmap item, not as something you can use.
+</Callout>
 
 Privacy should never prevent you from proving legitimate transactions when you need to.
 
-If a landlord, tax authority, merchant, or auditor asks for proof of payment, you can generate a **Selective Disclosure Proof**:
+When this ships, a landlord, tax authority, merchant, or auditor asking for proof of payment will be answerable with a **Selective Disclosure Proof**:
 
-- **Note-Scoped:** The disclosure reveals **only that single payment** (amount, date, and recipient).
-- **Zero Leakage:** It reveals **nothing** about your total wallet balance, your other transactions, or your remaining private notes.
-- **Cryptographically Bound:** The proof is cryptographically tied to the requesting party so it cannot be altered or re-used maliciously.
+- **Note-Scoped:** the disclosure will reveal **only that single payment** (amount, date, and recipient).
+- **Zero Leakage:** it will reveal **nothing** about your total wallet balance, your other transactions, or your remaining private notes.
+- **Cryptographically Bound:** the proof will be tied to the requesting party, so it cannot be altered or re-used elsewhere.
 
 ```
 [ Private Payment ] ──> Generate Selective Proof ──> [ Auditor / Landlord / Tax Office ]
@@ -108,7 +114,9 @@ Veil uses **canonical shared pools** operated according to the Stellar Private P
 ### Association Set Providers (ASPs)
 Each pool enforces membership policies:
 - **Block-Lists:** Sanctioned, stolen, or malicious addresses (such as OFAC-listed accounts) are blocked from entering or transacting in the pool.
-- **Allow-Lists:** Certain institutional pools (such as the EURC pool) may require verified allow-list enrollment.
+- **Allow-Lists:** The specification also permits allow-list pools, which require verified
+  enrollment before you may deposit. **No allow-list pool exists today** — both pools in
+  SPP's testnet deployment hold native XLM and run the block-list policy.
 
 ### Operator Key Freezing
 - The pool operator has the administrative ability to **freeze listed keys or notes** that violate compliance rules or sanctions.
@@ -130,7 +138,7 @@ We state this plainly so you understand the trust model: Veil does not operate p
 
 - [x] **Private sends hide amounts and counterparties inside the pool.**
 - [x] **Deposits (shield) and withdrawals (unshield) are visible on the public Stellar ledger.**
-- [x] **Selective disclosure lets you prove a specific transaction without exposing your whole wallet.**
+- [ ] **Selective disclosure** — proving a specific transaction without exposing your whole wallet. **Planned; not yet available.**
 - [x] **Pool operators can enforce compliance block-lists and freeze listed keys.**
 - [x] **Testnet only today:** Never attempt to use private features on Mainnet until fully audited.
 

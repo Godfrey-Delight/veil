@@ -124,10 +124,10 @@ export function PrivacyExplainerModal({ isOpen, onClose }: PrivacyExplainerModal
         {/* Section 3: Selective Disclosure */}
         <div style={{ marginBottom: '1.25rem' }}>
           <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem', color: 'var(--gold, #c5a059)' }}>
-            3. Selective Disclosure (&quot;Prove this Payment&quot;)
+            3. Selective Disclosure (&quot;Prove this Payment&quot;) — coming soon
           </h3>
           <p style={{ fontSize: '0.8125rem', color: 'rgba(246, 247, 248, 0.75)', lineHeight: 1.5, margin: 0 }}>
-            You can generate a single cryptographic proof for a specific transaction (e.g. for tax reporting or paying rent) without revealing your overall balance or other transactions.
+            Not available yet. Once it ships, you will be able to generate a single cryptographic proof for a specific transaction (e.g. for tax reporting or paying rent) without revealing your overall balance or other transactions.
           </p>
         </div>
 
