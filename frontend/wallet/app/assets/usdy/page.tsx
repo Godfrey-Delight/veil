@@ -197,7 +197,7 @@ export default function UsdyExplainerPage() {
               </svg>
             </a>
             <a
-              href={USDY_EXPLAINER.prospectusUrl}
+              href={USDY_EXPLAINER.redemptionUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="btn btn-secondary"

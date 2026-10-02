@@ -11,9 +11,9 @@ describe('USDY Explainer Content and Disclosures', () => {
     expect(USDY_EXPLAINER.homeDomain).toBe('ondo.finance')
   })
 
-  test('includes valid https disclosure and prospectus links', () => {
+  test('includes valid https disclosure and redemption links', () => {
     expect(USDY_EXPLAINER.disclosuresUrl).toMatch(/^https:\/\/ondo\.finance/)
-    expect(USDY_EXPLAINER.prospectusUrl).toMatch(/^https:\/\/ondo\.finance/)
+    expect(USDY_EXPLAINER.redemptionUrl).toMatch(/^https:\/\/app\.ondo\.finance/)
   })
 
   test('explains value accrual via price rather than separate payouts', () => {

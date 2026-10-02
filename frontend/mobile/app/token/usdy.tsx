@@ -13,19 +13,22 @@ import { useRouter } from 'expo-router';
 import { useTheme } from '../../hooks/useTheme';
 import { fontFamily } from '../../theme/typography';
 import { FlowHeader } from '../../components/FlowHeader';
+import { USDY_MAINNET_ISSUER } from '../../lib/assets';
 
 const USDY_INFO = {
   code: 'USDY',
   name: 'Ondo US Dollar Yield',
   issuerName: 'Ondo Finance (Ondo USDY LLC)',
-  issuerAddress: 'GAJMPX5NBOG6TQFPQGRABJEEB2YE7RFRLUKJDZAZGAD5GFX4J7TADAZ6',
+  issuerAddress: USDY_MAINNET_ISSUER,
   homeDomain: 'ondo.finance',
   disclosuresUrl: 'https://ondo.finance/usdy',
-  prospectusUrl: 'https://ondo.finance/documents/usdy-prospectus',
+  // See the note in frontend/wallet/lib/usdy.ts: there is no prospectus, so
+  // this is the issuer-declared redemption route.
+  redemptionUrl: 'https://app.ondo.finance/assets/usdy',
   whatItIs:
     'USDY is a tokenized note backed by short-term US Treasury bills and bank demand deposits. It is issued on Stellar with open transferability (auth_required is false).',
   howValueAccrues:
-    'The value per token adjusts upward over time as interest on underlying US Treasury bills accrues. It does not pay out separate periodic cash distributions; each token simply reflects a higher unit value over time.',
+    'The price per token adjusts upward over time as interest on underlying US Treasury bills accrues. It does not pay out separate periodic cash distributions; each token simply reflects a higher unit value over time.',
   backedBy:
     'Bankruptcy-remote SPV holding short-term US Treasuries and bank deposits, with third-party daily attestations.',
   risks: [
@@ -113,9 +116,9 @@ export default function UsdyDetailScreen() {
             </Pressable>
             <Pressable
               style={styles.linkButton}
-              onPress={() => Linking.openURL(USDY_INFO.prospectusUrl)}
+              onPress={() => Linking.openURL(USDY_INFO.redemptionUrl)}
             >
-              <Text style={styles.linkButtonText}>Prospectus & Filings ↗</Text>
+              <Text style={styles.linkButtonText}>How to Redeem (Ondo) ↗</Text>
             </Pressable>
           </View>
         </View>
@@ -205,13 +208,13 @@ function createStyles(colors: any) {
       fontSize: 24,
       fontWeight: '700',
       color: colors.primary || '#FDDA24',
-      fontFamily: fontFamily.anton,
+      fontFamily: fontFamily.accent,
     },
     tokenName: {
       fontSize: 20,
       fontWeight: '600',
       color: colors.text || '#F6F7F8',
-      fontFamily: fontFamily.lora,
+      fontFamily: fontFamily.heading,
       textAlign: 'center',
     },
     tagRow: {
@@ -229,7 +232,7 @@ function createStyles(colors: any) {
     },
     codeTagText: {
       fontSize: 12,
-      fontFamily: fontFamily.inconsolata,
+      fontFamily: fontFamily.address,
       color: colors.primary || '#FDDA24',
       fontWeight: '600',
     },
@@ -248,7 +251,7 @@ function createStyles(colors: any) {
     sectionLabel: {
       fontSize: 11,
       letterSpacing: 0.8,
-      fontFamily: fontFamily.anton,
+      fontFamily: fontFamily.accent,
       color: 'rgba(246,247,248,0.4)',
       marginBottom: 8,
     },
@@ -287,7 +290,7 @@ function createStyles(colors: any) {
     },
     addressText: {
       fontSize: 11,
-      fontFamily: fontFamily.inconsolata,
+      fontFamily: fontFamily.address,
       color: 'rgba(246,247,248,0.45)',
       marginBottom: 12,
     },
@@ -328,7 +331,7 @@ function createStyles(colors: any) {
     riskLabel: {
       fontSize: 11,
       letterSpacing: 0.8,
-      fontFamily: fontFamily.anton,
+      fontFamily: fontFamily.accent,
       color: '#FF6B6B',
     },
     riskItem: {

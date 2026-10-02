@@ -10,6 +10,8 @@
  * - STRICTLY avoids advice-like language ("returns", "profit", "guaranteed", "earnings", "risk-free", "promised", etc.).
  */
 
+import { USDY_MAINNET_ISSUER } from './assets'
+
 export interface UsdyRiskItem {
   id: string
   title: string
@@ -23,7 +25,7 @@ export interface UsdyExplainerContent {
   issuerAddress: string
   homeDomain: string
   disclosuresUrl: string
-  prospectusUrl: string
+  redemptionUrl: string
   whatItIs: string
   howValueAccrues: string
   backedBy: string
@@ -35,14 +37,17 @@ export const USDY_EXPLAINER: UsdyExplainerContent = {
   code: 'USDY',
   name: 'Ondo US Dollar Yield',
   issuerName: 'Ondo Finance (Ondo USDY LLC)',
-  issuerAddress: 'GAJMPX5NBOG6TQFPQGRABJEEB2YE7RFRLUKJDZAZGAD5GFX4J7TADAZ6',
+  issuerAddress: USDY_MAINNET_ISSUER,
   homeDomain: 'ondo.finance',
   disclosuresUrl: 'https://ondo.finance/usdy',
-  prospectusUrl: 'https://ondo.finance/documents/usdy-prospectus',
+  // Ondo publishes no prospectus. This is the redemption route their own
+  // stellar.toml declares (`redemption_instructions`), which is what a holder
+  // on a disclosure screen actually needs.
+  redemptionUrl: 'https://app.ondo.finance/assets/usdy',
   whatItIs:
     'USDY is a tokenized note backed by short-term US Treasury bills and bank demand deposits. It is issued on Stellar as an asset with open transferability (auth_required is false).',
   howValueAccrues:
-    'The value per token adjusts upward over time as interest on the underlying US Treasury bills accrues. It does not pay out separate periodic cash distributions or balance increments; each token simply reflects a higher unit value over time.',
+    'The price per token adjusts upward over time as interest on the underlying US Treasury bills accrues. It does not pay out separate periodic cash distributions or balance increments; each token simply reflects a higher unit value over time.',
   backedBy:
     'Bankruptcy-remote SPV holding short-term US Treasuries and bank deposits, with third-party daily attestations.',
   risks: [

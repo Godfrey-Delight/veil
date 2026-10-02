@@ -16,6 +16,8 @@ const __dirname = path.dirname(__filename)
 const usdyFilePath = path.resolve(__dirname, '../frontend/wallet/lib/usdy.ts')
 const usdyPagePath = path.resolve(__dirname, '../frontend/wallet/app/assets/usdy/page.tsx')
 const usdyMobilePath = path.resolve(__dirname, '../frontend/mobile/app/token/usdy.tsx')
+const walletAssetsPath = path.resolve(__dirname, '../frontend/wallet/lib/assets.ts')
+const mobileAssetsPath = path.resolve(__dirname, '../frontend/mobile/lib/assets.ts')
 
 console.log('Testing USDY Asset Explainer & Advice-Word Linter...')
 
@@ -26,17 +28,29 @@ assert(fs.existsSync(usdyMobilePath), `Missing ${usdyMobilePath}`)
 const usdyContent = fs.readFileSync(usdyFilePath, 'utf-8')
 const usdyPageContent = fs.readFileSync(usdyPagePath, 'utf-8')
 const usdyMobileContent = fs.readFileSync(usdyMobilePath, 'utf-8')
+const walletAssetsContent = fs.readFileSync(walletAssetsPath, 'utf-8')
+const mobileAssetsContent = fs.readFileSync(mobileAssetsPath, 'utf-8')
 
 // 1. Check Issuer and Disclosures
-assert(usdyContent.includes('GAJMPX5NBOG6TQFPQGRABJEEB2YE7RFRLUKJDZAZGAD5GFX4J7TADAZ6'), 'Must contain exact registered issuer address')
+// The issuer is defined once per app, in lib/assets.ts, and referenced by name
+// everywhere else. Asserting the literal here would have made this script the
+// fourth copy of it — which is the thing the rule exists to prevent.
+const USDY_ISSUER = 'GAJMPX5NBOG6TQFPQGRABJEEB2YE7RFRLUKJDZAZGAD5GFX4J7TADAZ6'
+assert(walletAssetsContent.includes(`export const USDY_MAINNET_ISSUER = '${USDY_ISSUER}'`), 'wallet lib/assets.ts must define USDY_MAINNET_ISSUER as the registered issuer')
+assert(mobileAssetsContent.includes(`export const USDY_MAINNET_ISSUER = '${USDY_ISSUER}'`), 'mobile lib/assets.ts must define USDY_MAINNET_ISSUER as the registered issuer')
+assert(usdyContent.includes('USDY_MAINNET_ISSUER'), 'wallet explainer must reference the shared issuer constant, not a literal')
+assert(usdyMobileContent.includes('USDY_MAINNET_ISSUER'), 'mobile explainer must reference the shared issuer constant, not a literal')
+assert(!usdyContent.includes(USDY_ISSUER), 'wallet explainer must not hardcode the issuer address')
+assert(!usdyMobileContent.includes(USDY_ISSUER), 'mobile explainer must not hardcode the issuer address')
 assert(usdyContent.includes('ondo.finance'), 'Must contain homeDomain ondo.finance')
 assert(usdyContent.includes('https://ondo.finance/usdy'), 'Must link to official disclosures')
-assert(usdyContent.includes('https://ondo.finance/documents/usdy-prospectus'), 'Must link to prospectus')
+// Ondo publishes no prospectus; their stellar.toml declares a redemption route.
+assert(usdyContent.includes('https://app.ondo.finance/assets/usdy'), 'Must link to the issuer-declared redemption route')
 
 // 2. Check Explanations
 assert(usdyContent.includes('US Treasury bills and bank demand deposits'), 'Must state asset backing')
 assert(usdyContent.includes('does not pay out separate periodic cash distributions'), 'Must clarify no separate payout distributions')
-assert(usdyContent.includes('value per token adjusts upward over time as interest'), 'Must explain price-based value accrual')
+assert(usdyContent.includes('price per token adjusts upward over time as interest'), 'Must explain price-based value accrual')
 
 // 3. Check Risk Categories
 const requiredRisks = [
