@@ -1,338 +1,232 @@
-import {
-  Keypair,
-  Horizon,
-  TransactionBuilder,
-  Operation,
-  Asset,
-  BASE_FEE,
-  Networks,
-} from '@stellar/stellar-sdk'
-import { derivePrivacyKeys, type PrivacyKeys } from './keys'
-import { getSppConfig, isPrivacyEnabled, type SppNetworkConfig } from './config'
-import type { VeilNetworkName } from '../network'
+'use client'
 
-export interface PrivateNote {
-  id: string
-  asset: 'XLM' | 'EURC'
-  amount: string
-  owner: string
-  nullifier: string
-  spent: boolean
-  createdAt: number
+import { TransactionBuilder, hash } from '@stellar/stellar-sdk'
+import { ensureFeePayer } from '@/lib/feePayer'
+import { getNetwork } from '@/lib/network'
+import { getConfiguredBootnodeUrl, getSppConfig } from './config'
+import { resolveBootnodeWithFallback } from './bootnode'
+
+export type PrivacyStatus = 'idle' | 'syncing' | 'ready' | 'error'
+
+export interface PrivacyProgressEvent {
+  flow: string
+  stage: string
+  message: string
+  current?: number
+  total?: number
 }
 
-export interface ShieldParams {
-  amount: string
-  asset?: 'XLM' | 'EURC'
+export interface PrivacyClient {
+  sync: () => Promise<void>
+  privateBalance: () => Promise<bigint>
+  shield: (amount: bigint | number | string) => Promise<string>
+  privateSend: (recipient: string, amount: bigint | number | string) => Promise<string>
+  unshield: (amount: bigint | number | string, recipient?: string) => Promise<string>
+  recipientLookup: (address: string) => Promise<RecipientRegistration>
+  stop: () => void
 }
 
-export interface PrivateSendParams {
-  recipientAddress: string
-  amount: string
-  asset?: 'XLM' | 'EURC'
-}
-
-export interface UnshieldParams {
-  destinationAddress: string
-  amount: string
-  asset?: 'XLM' | 'EURC'
-}
-
-export interface TransactionResult {
-  txHash: string
-  feeCharged: string
+/**
+ * What the SPP public-key registry says about one address (V137).
+ *
+ * `registered` is true only when the registry contract holds an entry for the
+ * address. `registryFullySynced` reports whether the local registry index has
+ * caught up to the network tip — a `registered: false` answer while the index
+ * is still syncing means "not seen yet", not "definitely absent".
+ */
+export interface RecipientRegistration {
+  registered: boolean
+  /** The recipient's `noteKey` from the registry entry, when registered. */
+  noteKey?: string
+  /** The recipient's `encryptionKey` from the registry entry, when registered. */
+  encryptionKey?: string
+  /** Ledger the registry entry was last modified on, when registered. */
   ledger?: number
-  noteId?: string
+  /** Whether the local registry index is caught up to the network tip. */
+  registryFullySynced: boolean
 }
 
-/** In-memory note store for testnet privacy simulation/client state */
-const notePoolStore: Map<string, PrivateNote[]> = new Map()
+/**
+ * The transaction hash of a completed pool execution, or throws.
+ *
+ * The SPP SDK resolves `deposit` / `transfer` / `withdraw` to a
+ * `PoolExecuteResult` (`{ status, hashes, message, ... }`), not to a hash
+ * string — `String(result)` would render `[object Object]`. The hash is the
+ * first entry of `hashes`, and it only exists when `status === 'ok'`.
+ */
+function poolExecuteHash(result: { status: string; hashes: string[]; message?: string }): string {
+  if (result.status !== 'ok' || !result.hashes.length) {
+    throw new Error(result.message || 'The private transaction was not accepted by the pool.')
+  }
+  return result.hashes[0]
+}
 
-export class VeilPrivacyClient {
-  private readonly signer: Keypair
-  private readonly network: VeilNetworkName
-  private readonly sppConfig: SppNetworkConfig
-  private readonly keys: PrivacyKeys
-  private readonly horizonServer: Horizon.Server
+function toBigInt(value: bigint | number | string): bigint {
+  if (typeof value === 'bigint') return value
+  if (typeof value === 'number') return BigInt(Math.trunc(value))
+  return BigInt(value)
+}
 
-  constructor(signer: Keypair, network: VeilNetworkName = 'testnet', horizonUrl?: string) {
-    if (!isPrivacyEnabled(network)) {
-      throw new Error(`Privacy features are disabled on network '${network}'. Only testnet is supported.`)
-    }
-
-    const config = getSppConfig(network)
-    if (!config) {
-      throw new Error(`Missing SPP configuration for network '${network}'.`)
-    }
-
-    this.signer = signer
-    this.network = network
-    this.sppConfig = config
-    this.keys = derivePrivacyKeys(signer)
-    this.horizonServer = new Horizon.Server(
-      horizonUrl || 'https://horizon-testnet.stellar.org'
-    )
+async function getSigner() {
+  const keypair = await ensureFeePayer()
+  if (!keypair) {
+    throw new Error('No spending account is available for privacy operations. Fund your fee-payer first.')
   }
 
-  getPublicKey(): string {
-    return this.signer.publicKey()
+  return {
+    async getPublicKey() {
+      return keypair.publicKey()
+    },
+    async signMessage(message: string | Uint8Array) {
+      const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message
+      return keypair.sign(Buffer.from(bytes)).toString('base64')
+    },
+    async signTransaction(xdr: string, options?: { networkPassphrase?: string }) {
+      const transaction = TransactionBuilder.fromXDR(
+        xdr,
+        options?.networkPassphrase ?? getNetwork().networkPassphrase,
+      )
+      transaction.sign(keypair)
+      return { signedTxXdr: transaction.toXDR(), signerAddress: keypair.publicKey() }
+    },
+    async signAuthEntry(entry: string) {
+      const signature = keypair.sign(hash(Buffer.from(entry, 'base64')))
+      return { signedAuthEntry: signature.toString('base64'), signerAddress: keypair.publicKey() }
+    },
   }
+}
 
-  getPrivacyKeys(): PrivacyKeys {
-    return this.keys
-  }
-
-  /**
-   * Returns current private (shielded) balance for the active account.
-   */
-  async getPrivateBalance(asset: 'XLM' | 'EURC' = 'XLM'): Promise<string> {
-    const notes = this.getUnspentNotes(asset)
-    const total = notes.reduce((sum, n) => sum + parseFloat(n.amount), 0)
-    return total.toFixed(7).replace(/\.?0+$/, '') || '0'
-  }
-
-  /**
-   * Deposit public funds into the shielded pool as a private note.
-   */
-  async shield({ amount, asset = 'XLM' }: ShieldParams): Promise<TransactionResult> {
-    const numAmount = parseFloat(amount)
-    if (isNaN(numAmount) || numAmount <= 0) {
-      throw new Error(`Invalid shield amount: '${amount}'. Must be greater than 0.`)
-    }
-
-    const pool = this.sppConfig.pools[asset]
-    if (!pool) {
-      throw new Error(`No privacy pool configured for asset '${asset}'.`)
-    }
-
-    try {
-      // 1. Verify sender public account exists and has sufficient balance
-      const account = await this.horizonServer.loadAccount(this.signer.publicKey())
-      const balEntry = account.balances.find((b) => b.asset_type === 'native')
-      const publicBalance = balEntry ? parseFloat(balEntry.balance) : 0
-
-      if (publicBalance < numAmount) {
-        throw new Error(`Insufficient public balance (${publicBalance} XLM) to shield ${numAmount} XLM.`)
-      }
-
-      // 2. Submit on-chain deposit transaction to Horizon / pool address
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: Networks.TESTNET,
-      })
-        .addOperation(
-          Operation.payment({
-            destination: this.signer.publicKey(),
-            asset: Asset.native(),
-            amount: '0.0000001', // micro-payment probe / proof on-chain
-          })
-        )
-        .setTimeout(30)
-        .build()
-
-      tx.sign(this.signer)
-      const res = await this.horizonServer.submitTransaction(tx)
-
-      // 3. Mint private note into shielded storage
-      const noteId = `note_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
-      const note: PrivateNote = {
-        id: noteId,
-        asset,
-        amount: numAmount.toString(),
-        owner: this.keys.notePublicKey,
-        nullifier: `null_${Math.random().toString(36).slice(2, 9)}`,
-        spent: false,
-        createdAt: Date.now(),
-      }
-
-      const existing = notePoolStore.get(this.keys.notePublicKey) || []
-      existing.push(note)
-      notePoolStore.set(this.keys.notePublicKey, existing)
-
+function getContractConfig(config: NonNullable<ReturnType<typeof getSppConfig>>) {
+  const network = getNetwork()
+  return {
+    network: network.networkPassphrase,
+    deployer: config.deployer,
+    admin: config.admin,
+    asp_membership: config.aspMembership,
+    asp_non_membership: config.aspNonMembership,
+    verifiers: { B: config.verifiers.standard, B_gvk_T: config.verifiers.traceable },
+    public_key_registry: config.publicKeyRegistry,
+    pools: config.pools.map((pool) => {
+      const assetKind: 'native' | 'contract' = pool.assetKind === 'native' ? 'native' : 'contract'
       return {
-        txHash: res.hash,
-        feeCharged: '0.0174', // Median SPP transaction fee
-        ledger: res.ledger,
-        noteId,
+        poolContractId: pool.id,
+        tokenContractId: pool.tokenContractId,
+        deploymentLedger: pool.deploymentLedger,
+        enabled: true,
+        policyFlags: [...pool.policyFlags],
+        ...(pool.gvkMode ? { gvkMode: pool.gvkMode } : {}),
+        asset: { kind: assetKind, code: 'XLM', symbol: 'XLM' },
       }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
-      throw new Error(`Shield operation failed: ${message}`)
-    }
+    }),
+  }
+}
+
+let clientPromise: Promise<PrivacyClient> | null = null
+
+async function initClient(): Promise<PrivacyClient> {
+  if (typeof window === 'undefined') {
+    throw new Error('Privacy is only available in the browser.')
   }
 
-  /**
-   * Transfer shielded funds privately inside the pool without revealing amount or counterparty on-chain.
-   */
-  async privateSend({ recipientAddress, amount, asset = 'XLM' }: PrivateSendParams): Promise<TransactionResult> {
-    const numAmount = parseFloat(amount)
-    if (isNaN(numAmount) || numAmount <= 0) {
-      throw new Error(`Invalid private send amount: '${amount}'. Must be greater than 0.`)
-    }
+  const sppConfig = getSppConfig()
+  if (!sppConfig) {
+    throw new Error('SPP pool is not configured for this network yet.')
+  }
 
-    const currentBalance = parseFloat(await this.getPrivateBalance(asset))
-    if (currentBalance < numAmount) {
-      throw new Error(`Insufficient private balance (${currentBalance} ${asset}) to send ${numAmount} ${asset}.`)
-    }
+  const module = await import('stellar-private-payments')
+  const storage = await module.Storage.open()
+  const network = getNetwork()
+  const client = await module.Client.new({
+    rpcUrl: network.rpcUrl,
+    storage,
+    contractConfig: getContractConfig(sppConfig),
+    circuitsBaseUrl: `${window.location.origin}/spp/circuits/`,
+    // Probe Veil's own archive and fall back to Nethermind's when it is
+    // unreachable (#719). Resolving here rather than trusting the static
+    // config is what makes the BootnodeBanner's claim true: the banner
+    // reports the outcome of this same cached probe, so without it the
+    // UI could say "using Nethermind" while the client used a dead URL.
+    bootnodeUrl: await resolveBootnodeWithFallback(getConfiguredBootnodeUrl()),
+  })
 
-    try {
-      // Derive recipient's privacy key representation (from Stellar public address)
-      let recipientNoteKey = recipientAddress
-      try {
-        const dummyRecipientKp = Keypair.fromPublicKey(recipientAddress)
-        const recipientKeys = derivePrivacyKeys(dummyRecipientKp)
-        recipientNoteKey = recipientKeys.notePublicKey
-      } catch {
-        recipientNoteKey = recipientAddress
-      }
+  const signer = await getSigner()
+  // `userAddress` is deliberately omitted: SPP resolves it from
+  // `signer.getPublicKey()` and defaults `signerAddress` to it. Passing the
+  // wallet's `C…` contract address here while signing with the `G…` spending
+  // account would pair an address with a key that cannot authorise for it.
+  const account = await client.account({ networkPassphrase: network.networkPassphrase }, signer as any)
 
-      // Spend sender's notes
-      const notes = this.getUnspentNotes(asset)
-      let remainingToSpend = numAmount
+  const pool = await account.pool({ poolContract: sppConfig.pools[0].id })
 
-      for (const note of notes) {
-        if (remainingToSpend <= 0) break
-        const noteVal = parseFloat(note.amount)
-        note.spent = true
-
-        if (noteVal > remainingToSpend) {
-          // Change note back to sender
-          const changeVal = noteVal - remainingToSpend
-          const changeNote: PrivateNote = {
-            id: `note_change_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-            asset,
-            amount: changeVal.toString(),
-            owner: this.keys.notePublicKey,
-            nullifier: `null_${Math.random().toString(36).slice(2, 9)}`,
-            spent: false,
-            createdAt: Date.now(),
-          }
-          const senderNotes = notePoolStore.get(this.keys.notePublicKey) || []
-          senderNotes.push(changeNote)
-          notePoolStore.set(this.keys.notePublicKey, senderNotes)
-          remainingToSpend = 0
-        } else {
-          remainingToSpend -= noteVal
-        }
-      }
-
-      // Credit recipient's note
-      const recipientNoteId = `note_tx_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
-      const recipientNote: PrivateNote = {
-        id: recipientNoteId,
-        asset,
-        amount: numAmount.toString(),
-        owner: recipientNoteKey,
-        nullifier: `null_${Math.random().toString(36).slice(2, 9)}`,
-        spent: false,
-        createdAt: Date.now(),
-      }
-
-      const recNotes = notePoolStore.get(recipientNoteKey) || []
-      recNotes.push(recipientNote)
-      notePoolStore.set(recipientNoteKey, recNotes)
-
-      // Dummy proof verification transaction hash for SPP pool proof
-      const pseudoHash = `0x${Buffer.from(this.keys.notePublicKey.slice(0, 16) + recipientNoteKey.slice(0, 16)).toString('hex')}`
-
+  return {
+    async sync() {
+      await client.sync()
+    },
+    async privateBalance() {
+      return BigInt((await pool.balance()) ?? 0)
+    },
+    async shield(amount) {
+      const value = toBigInt(amount)
+      if (value <= 0n) throw new Error('Shield amount must be greater than zero.')
+      return poolExecuteHash(await pool.deposit(value))
+    },
+    async privateSend(recipient, amount) {
+      const value = toBigInt(amount)
+      if (value <= 0n) throw new Error('Private send amount must be greater than zero.')
+      return poolExecuteHash(await pool.transfer(recipient, value))
+    },
+    async unshield(amount, recipient) {
+      const value = toBigInt(amount)
+      if (value <= 0n) throw new Error('Unshield amount must be greater than zero.')
+      return poolExecuteHash(await pool.withdraw(value, recipient ?? undefined))
+    },
+    async recipientLookup(address) {
+      const lookup = await client.recipientLookup(address)
+      const entry = lookup.entry
       return {
-        txHash: pseudoHash,
-        feeCharged: '0.0174',
-        noteId: recipientNoteId,
+        registered: entry !== undefined && entry !== null,
+        noteKey: entry?.noteKey,
+        encryptionKey: entry?.encryptionKey,
+        ledger: entry?.ledger,
+        registryFullySynced: lookup.registryFullySynced,
       }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
-      throw new Error(`Private send operation failed: ${message}`)
-    }
+    },
+    stop() {
+      client.stopBackgroundSync()
+    },
   }
+}
 
-  /**
-   * Withdraw funds from the shielded pool back to a public address.
-   */
-  async unshield({ destinationAddress, amount, asset = 'XLM' }: UnshieldParams): Promise<TransactionResult> {
-    const numAmount = parseFloat(amount)
-    if (isNaN(numAmount) || numAmount <= 0) {
-      throw new Error(`Invalid unshield amount: '${amount}'. Must be greater than 0.`)
-    }
+export async function getPrivacyClient(): Promise<PrivacyClient> {
+  // Cache the successful client only. A rejected promise left in place would
+  // make every later retry re-throw the first failure (an unfunded fee payer,
+  // say) until the page is reloaded.
+  clientPromise ??= initClient().catch((error) => {
+    clientPromise = null
+    throw error
+  })
+  return clientPromise
+}
 
-    const currentBalance = parseFloat(await this.getPrivateBalance(asset))
-    if (currentBalance < numAmount) {
-      throw new Error(`Insufficient private balance (${currentBalance} ${asset}) to unshield ${numAmount} ${asset}.`)
-    }
+export function toUserFacingPrivacyError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  const cleaned = message.replace(/^Error:\s*/, '').trim()
+  if (!cleaned) return 'Privacy operation failed. Please try again.'
 
-    try {
-      // 1. Spend private notes
-      const notes = this.getUnspentNotes(asset)
-      let remainingToSpend = numAmount
+  if (cleaned.includes('SPP pool is not configured')) return 'Privacy is not enabled on this network yet.'
+  if (cleaned.includes('No spending account is available')) return 'Your spending account is not ready yet. Fund it and try again.'
+  if (cleaned.includes('RPC')) return 'Privacy could not reach the network. Please try again in a moment.'
 
-      for (const note of notes) {
-        if (remainingToSpend <= 0) break
-        const noteVal = parseFloat(note.amount)
-        note.spent = true
+  return cleaned
+}
 
-        if (noteVal > remainingToSpend) {
-          const changeVal = noteVal - remainingToSpend
-          const changeNote: PrivateNote = {
-            id: `note_change_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-            asset,
-            amount: changeVal.toString(),
-            owner: this.keys.notePublicKey,
-            nullifier: `null_${Math.random().toString(36).slice(2, 9)}`,
-            spent: false,
-            createdAt: Date.now(),
-          }
-          const senderNotes = notePoolStore.get(this.keys.notePublicKey) || []
-          senderNotes.push(changeNote)
-          notePoolStore.set(this.keys.notePublicKey, senderNotes)
-          remainingToSpend = 0
-        } else {
-          remainingToSpend -= noteVal
-        }
-      }
+export function attachPrivacyProgress(handler: (event: PrivacyProgressEvent) => void) {
+  const eventName = 'stellar-private-payments:tx-progress'
+  const listener = ((event: Event) => {
+    const detail = (event as CustomEvent<PrivacyProgressEvent>).detail
+    if (detail) handler(detail)
+  }) as EventListener
 
-      // 2. Execute public payment on-chain from pool/signer to recipient
-      const account = await this.horizonServer.loadAccount(this.signer.publicKey())
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: Networks.TESTNET,
-      })
-        .addOperation(
-          Operation.payment({
-            destination: destinationAddress,
-            asset: Asset.native(),
-            amount: numAmount.toFixed(7),
-          })
-        )
-        .setTimeout(30)
-        .build()
-
-      tx.sign(this.signer)
-      const res = await this.horizonServer.submitTransaction(tx)
-
-      return {
-        txHash: res.hash,
-        feeCharged: '0.0174',
-        ledger: res.ledger,
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
-      throw new Error(`Unshield operation failed: ${message}`)
-    }
-  }
-
-  /**
-   * Synchronize note state with bootnode and pool events.
-   */
-  async sync(): Promise<{ syncedLedger: number; unspentNotesCount: number }> {
-    const notes = this.getUnspentNotes('XLM')
-    return {
-      syncedLedger: 100000,
-      unspentNotesCount: notes.length,
-    }
-  }
-
-  private getUnspentNotes(asset: 'XLM' | 'EURC'): PrivateNote[] {
-    const list = notePoolStore.get(this.keys.notePublicKey) || []
-    return list.filter((n) => n.asset === asset && !n.spent)
-  }
+  window.addEventListener(eventName, listener)
+  return () => window.removeEventListener(eventName, listener)
 }
