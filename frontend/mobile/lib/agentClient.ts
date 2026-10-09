@@ -94,17 +94,41 @@ export function parseSwapIntent(value: unknown): SwapIntent | undefined {
   return { from, to, ...(amount ? { amount } : {}) };
 }
 
+/**
+ * An invest hand-off from the server, or undefined when it is not valid.
+ */
 export function parseInvestIntent(value: unknown): InvestIntent | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
-  if (!v.asset || typeof v.asset !== 'object') return undefined;
-  const asset = v.asset as Record<string, unknown>;
-  const code = typeof asset.code === 'string' ? asset.code.trim().toUpperCase() : '';
-  const issuer = typeof asset.issuer === 'string' ? asset.issuer.trim() : '';
+  let code = typeof v.code === 'string' && /^[A-Z0-9]{1,12}$/.test(v.code) ? v.code : undefined;
+  let issuer = typeof v.issuer === 'string' && StrKey.isValidEd25519PublicKey(v.issuer) ? v.issuer : undefined;
+
+  if (v.asset && typeof v.asset === 'object') {
+    const asset = v.asset as Record<string, unknown>;
+    if (!code && typeof asset.code === 'string' && /^[A-Z0-9]{1,12}$/.test(asset.code.trim().toUpperCase())) {
+      code = asset.code.trim().toUpperCase();
+    }
+    if (!issuer && typeof asset.issuer === 'string' && StrKey.isValidEd25519PublicKey(asset.issuer.trim())) {
+      issuer = asset.issuer.trim();
+    }
+  }
+
+  if (!code || !issuer) return undefined;
+
+  // A hand-off without a usable amount is dropped, not trimmed down to one
+  // without an amount. The agent has already told the user it is ready to buy a
+  // specific quantity; opening the screen with that quantity missing, or with a
+  // negative one silently discarded, changes what was agreed. This also matches
+  // the web twin `app/earn/prefill.ts`, which refuses the same inputs — the two
+  // disagreeing is how one hand-off behaves differently per client.
   const amount = typeof v.amount === 'string' ? v.amount.trim() : '';
-  if (!/^[A-Z0-9]{1,12}$/.test(code) || !StrKey.isValidEd25519PublicKey(issuer)) return undefined;
   if (!/^\d+(\.\d{1,7})?$/.test(amount) || Number(amount) <= 0) return undefined;
-  return { asset: { code, issuer }, amount };
+  const quoteCurrency =
+    typeof v.quoteCurrency === 'string' && /^[A-Z0-9]{1,12}$/.test(v.quoteCurrency)
+      ? v.quoteCurrency
+      : undefined;
+
+  return { code, issuer, amount, ...(quoteCurrency ? { quoteCurrency } : {}), asset: { code, issuer } };
 }
 
 export type AgentRequest = {
