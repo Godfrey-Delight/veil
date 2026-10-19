@@ -5,13 +5,14 @@
 import '../lib/polyfills';
 
 import { useEffect, useRef } from 'react';
-import { Stack, useRouter, useSegments } from 'expo-router';
+import { Stack, useRouter, useSegments, usePathname } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
 import * as SystemUI from 'expo-system-ui';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import { StyleSheet } from 'react-native';
 
@@ -40,6 +41,14 @@ SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
   const { colors, isDark } = useTheme();
+  // Only where privacy is actually in play.
+  //
+  // The banner reports which SPP archive the privacy client will use. That is
+  // worth saying on a privacy screen and is noise everywhere else — on the
+  // dashboard it reads as a standing error about a feature the user is not
+  // using, and before a wallet exists it is the first thing a new user sees.
+  const pathname = usePathname();
+  const showsBootnodeBanner = pathname.startsWith('/privacy');
   const [fontsLoaded, fontError] = useFonts(fontAssets);
 
   useEffect(() => {
@@ -99,10 +108,22 @@ export default function RootLayout() {
     // still light, which is belt-and-braces alongside the SystemUI call above.
     <GestureHandlerRootView style={[styles.root, { backgroundColor: colors.background }]}>
       <SafeAreaProvider>
+        {/* The app is edge-to-edge, which means Android no longer resizes the
+            window when the keyboard opens — so React Native's own
+            KeyboardAvoidingView has nothing to react to and silently does
+            nothing. This provider reads the real inset from the platform,
+            which is the only thing that still tells the truth once the window
+            stops changing size. */}
+        <KeyboardProvider>
         <BottomSheetModalProvider>
           <ConnectivityProvider>
             <WalletProvider>
-              <BootnodeBanner />
+              {/* Not on the way in. The banner reports which SPP archive the
+                  privacy client will use, which is meaningless before there is
+                  a wallet — and on the splash and the landing it reads as an
+                  error on a first impression. Gated here rather than inside the
+                  banner so the banner stays a pure render of its own status. */}
+              {showsBootnodeBanner ? <BootnodeBanner /> : null}
               <ConnectivityGate />
               <OutboxReplayGate />
               <InactivityLockGate />
@@ -126,6 +147,7 @@ export default function RootLayout() {
             </WalletProvider>
           </ConnectivityProvider>
         </BottomSheetModalProvider>
+        </KeyboardProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
