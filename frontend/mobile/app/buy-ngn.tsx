@@ -68,6 +68,23 @@ import {
   type OnrampOrder,
 } from '../lib/onramp';
 
+/**
+ * Coins a user may buy with naira. XLM only, for now.
+ *
+ * Linq told us on 2026-10-19 that they hold liquidity to provision XLM and not
+ * USDC. This is the one direction where that matters: the user transfers naira
+ * from their own bank app and *Linq* delivers the crypto, so offering a coin
+ * they cannot source takes real money for an order that cannot be filled.
+ * wraith refuses such an order outright, so leaving the option on screen would
+ * only move the failure to after the user had paid.
+ *
+ * Selling and paying bills still take both — the offramp sends crypto *to*
+ * Linq, and a bill is funded from the user's own balance.
+ *
+ * Add `'usdc'` back here when Linq can source it; nothing else needs to change.
+ */
+const BUYABLE_COINS: readonly NairaCoin[] = ['xlm'];
+
 type Step = 'amount' | 'confirm' | 'pay' | 'waiting' | 'done' | 'expired';
 
 /** Verification is once per person, so the outcome is remembered. */
@@ -101,7 +118,7 @@ export default function BuyWithNairaScreen() {
 
   const [customerRef, setCustomerRef] = useState<string | null>(null);
 
-  const [coin, setCoin] = useState<NairaCoin>('usdc');
+  const [coin, setCoin] = useState<NairaCoin>(BUYABLE_COINS[0]);
   const [amountNGN, setAmountNGN] = useState('');
 
   // 'loading' and 'failed' are distinct: a missing rate is not the same as a
@@ -444,19 +461,23 @@ export default function BuyWithNairaScreen() {
         {/* ── a1 · amount ───────────────────────────────────────────────── */}
         {!mainnetOnly && !kycMismatch && step === 'amount' && (
           <>
-            <View style={styles.segment}>
-              {(['xlm', 'usdc'] as NairaCoin[]).map((c) => (
-                <Pressable
-                  key={c}
-                  onPress={() => setCoin(c)}
-                  style={[styles.segmentItem, coin === c && styles.segmentActive]}
-                >
-                  <Text style={[styles.segmentText, coin === c && styles.segmentTextActive]}>
-                    {c.toUpperCase()}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
+            {/* One buyable coin needs no chooser, and a segment control with a
+                single item reads as a broken one. */}
+            {BUYABLE_COINS.length > 1 ? (
+              <View style={styles.segment}>
+                {BUYABLE_COINS.map((c) => (
+                  <Pressable
+                    key={c}
+                    onPress={() => setCoin(c)}
+                    style={[styles.segmentItem, coin === c && styles.segmentActive]}
+                  >
+                    <Text style={[styles.segmentText, coin === c && styles.segmentTextActive]}>
+                      {c.toUpperCase()}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
 
             <Text style={styles.question}>You pay</Text>
             <View style={styles.amountRow}>
