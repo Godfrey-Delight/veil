@@ -83,9 +83,8 @@ jest.mock('../lib/pickContact', () => ({
 
 const mockSpendAsset = jest.fn();
 jest.mock('../lib/spendAsset', () => {
-  const actual = jest.requireActual('../lib/spendAsset');
   return {
-    ...actual,
+    NotEnoughToSend: class NotEnoughToSend extends Error {},
     previewSpendFee: jest.fn(async () => null),
     spendAsset: (...args: unknown[]) => mockSpendAsset(...args),
   };

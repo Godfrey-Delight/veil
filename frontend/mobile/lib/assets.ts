@@ -50,10 +50,26 @@ export const AQUA_MAINNET_ISSUER = 'GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5P
 export const USDT0_MAINNET_ISSUER = 'GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q';
 export const USDT0_MAINNET_SAC = 'CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF';
 
-export const EURC_MAINNET_ISSUER = 'GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2';
-export const AQUA_MAINNET_ISSUER = 'GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA';
-
 export const ASSET_REGISTRY: Record<string, RegisteredAsset> = {
+  USDC: {
+    code: 'USDC',
+    issuer: USDC_MAINNET_ISSUER,
+    name: 'USD Coin',
+    issuerName: 'Circle',
+    homeDomain: 'circle.com',
+    network: 'mainnet',
+    kind: 'stablecoin',
+    reserveXlm: 0.5,
+  },
+  XLM: {
+    code: 'XLM',
+    issuer: '',
+    name: 'Stellar Lumens',
+    issuerName: 'Stellar Development Foundation',
+    homeDomain: 'stellar.org',
+    network: 'mainnet',
+    kind: 'native',
+  },
   EURC: {
     code: 'EURC',
     issuer: EURC_MAINNET_ISSUER,
@@ -472,4 +488,3 @@ export async function fetchHeldAssets(publicKey: string): Promise<HeldAsset[]> {
     `Could not read ${which} (${shortId}) from ${new URL(getNetwork().horizonUrl).host}. ${detail}`,
   );
 }
-
