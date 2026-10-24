@@ -2,15 +2,18 @@
 
 import { useActivityFeed } from '@/lib/activityFeed'
 import { inclusionFee } from '@/lib/fees'
+import { maxSendable as libMaxSendable } from '@/lib/sendable'
 import { Nav, PageHeader } from '@/components/ui/primitives'
 import { Shield } from 'lucide-react'
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
+import { resolveFederation } from '@/lib/federation'
 
 import {
   Keypair, TransactionBuilder, BASE_FEE, Asset, Operation, Memo,
   Contract, rpc as SorobanRpc, nativeToScVal, Horizon,
 } from '@stellar/stellar-sdk'
+import { fetchPlatformFee } from '@/lib/platformFee'
 import { walletLocal, walletSession } from '@/lib/walletStorage'
 const Server = Horizon.Server
 import { ContactPicker } from '@/components/ContactPicker'
@@ -24,6 +27,9 @@ import { buildStellarMemo, validateMemo } from '@/lib/sep7'
 import { getRegisteredAsset } from '@/lib/assets'
 import { buildSep7Memo, type Sep7MemoType } from '@/lib/sep7'
 import { passkeyErrorMessage } from '@/lib/passkeyAuth'
+import { isPasskeyCancellation } from '@/lib/passkeyOutcome'
+import { horizonErrorMessage } from '@/lib/horizonError'
+import { spendableNativeXlm } from '@/lib/reserves'
 import { validateMemoText } from '@/lib/memo'
 
 import { getNativeAssetContractId, getNetwork, getNetworkName } from '@/lib/network'
@@ -42,18 +48,22 @@ interface WalletAsset {
   contractId: string | null
   /** Decimal string from Horizon. '0' when the account could not be loaded. */
   balance: string
+  /**
+   * What the network will actually let go of: the balance less the reserve it
+   * locks. Only XLM has one, so for issued assets this equals the balance. Held
+   * separately from `balance` because both are true and the screen needs each —
+   * the balance is what the account holds, this is what it can send.
+   */
+  spendable?: string
 }
 
 function assetKey(a: WalletAsset): string {
   return a.issuer ? `${a.code}:${a.issuer}` : a.code
 }
 
-/** Spendable amount: native XLM keeps the base reserve + a fee cushion. */
+/** The page's assets carry the reserve-adjusted figure; the arithmetic lives in lib. */
 function maxSendable(asset: WalletAsset): number {
-  const bal = parseFloat(asset.balance)
-  if (!Number.isFinite(bal)) return 0
-  if (asset.code === 'XLM' && !asset.issuer) return Math.max(0, bal - 1.5)
-  return Math.max(0, bal)
+  return libMaxSendable(asset, inclusionFee())
 }
 
 /** An issuer as the review screen names it: who, when registered, then the full account. */
@@ -71,8 +81,44 @@ export default function SendPage() {
   useInactivityLock()
   const [step, setStep]               = useState<Step>('form')
   const [recipient, setRecipient]     = useState('')
+  const [resolvedAddress, setResolvedAddress] = useState<string | null>(null)
+  const [isResolvingName, setIsResolvingName] = useState(false)
+  const [nameResolutionError, setNameResolutionError] = useState<string | null>(null)
   const [amount, setAmount]           = useState('')
   const [memo, setMemo]               = useState('')
+
+  useEffect(() => {
+    const trimmed = recipient.trim()
+    if (!trimmed.includes('*')) {
+      setResolvedAddress(null)
+      setNameResolutionError(null)
+      setIsResolvingName(false)
+      return
+    }
+
+    let active = true
+    setIsResolvingName(true)
+    setNameResolutionError(null)
+
+    resolveFederation(trimmed)
+      .then((res) => {
+        if (active) {
+          setResolvedAddress(res.account_id)
+          setIsResolvingName(false)
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          setResolvedAddress(null)
+          setNameResolutionError(err instanceof Error ? err.message : 'Could not resolve federation name')
+          setIsResolvingName(false)
+        }
+      })
+
+    return () => {
+      active = false
+    }
+  }, [recipient])
   /**
    * The exact asset a payment request asked for, held until the account's
    * balances load so it can be selected by `code:issuer` rather than lost when
@@ -94,6 +140,8 @@ export default function SendPage() {
    */
   const memoIsText = !memoType || String(memoType).toUpperCase().replace(/^MEMO_/, '') === 'TEXT'
   const memoLengthError = memoIsText ? validateMemoText(memo) : null
+  /** What the memo field shows: the first reason the memo cannot be sent, if any. */
+  const memoFieldError = memo ? validateMemo(memo, memoType) : null
 
   /**
    * Prefill from the query string, so another screen can hand off a payment it
@@ -176,7 +224,16 @@ export default function SendPage() {
     server.loadAccount(signerPublicKey).then(account => {
       const list: WalletAsset[] = account.balances.map(b => {
         if (b.asset_type === 'native') {
-          return { code: 'XLM', issuer: null, contractId: getNativeAssetContractId(), balance: b.balance }
+          // The reserve depends on how many trustlines, offers and data entries
+          // this account holds, so it can only be known here, with the account
+          // in hand.
+          return {
+            code: 'XLM',
+            issuer: null,
+            contractId: getNativeAssetContractId(),
+            balance: b.balance,
+            spendable: spendableNativeXlm(account),
+          }
         }
         const issued = b as { asset_code: string; asset_issuer: string; balance: string }
         const asset  = new Asset(issued.asset_code, issued.asset_issuer)
@@ -297,7 +354,10 @@ export default function SendPage() {
   }
 
   function validateForm(): boolean {
-    const validAddress = (recipient.startsWith('G') || recipient.startsWith('C')) && recipient.length === 56
+    const isFederated = recipient.trim().includes('*')
+    const validAddress = isFederated
+      ? Boolean(resolvedAddress)
+      : (recipient.startsWith('G') || recipient.startsWith('C')) && recipient.length === 56
     if (!validAddress) return false
     if (isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) return false
     if (!selectedAsset) return false
@@ -347,15 +407,16 @@ export default function SendPage() {
       }
 
       const horizonServer = new Server(network.horizonUrl)
+      const destination = resolvedAddress ?? recipient
 
-      if (recipient.startsWith('G') && recipient.length === 56) {
+      if (destination.startsWith('G') && destination.length === 56) {
         const account = await horizonServer.loadAccount(feePayerKp.publicKey())
         const builder = new TransactionBuilder(account, {
           fee: inclusionFee(),
           networkPassphrase: network.networkPassphrase,
         })
           .addOperation(Operation.payment({
-            destination: recipient,
+            destination: destination,
             // The asset exactly as selected — code and issuer — never re-derived
             // from the code alone.
             asset: selectedAsset?.issuer
@@ -367,6 +428,52 @@ export default function SendPage() {
           // without it, exchange deposits arrive uncredited.
           .addMemo(memo.trim() ? buildStellarMemo(memo, memoType) ?? Memo.none() : Memo.none())
           .setTimeout(30)
+
+        // The Veil fee, appended after the user's own payment so theirs applies
+        // first — if the balance only covers one of them, the one they asked for
+        // is the one that happens, and the whole transaction fails rather than
+        // taking a fee for a payment that did not go out.
+        //
+        // Only on this branch. The Soroban path below is a single `transfer`
+        // invocation, and a Stellar transaction may carry at most one Soroban
+        // operation, so there is nowhere to put a second payment there.
+        //
+        // Affordability is checked before the op is added rather than after the
+        // submission fails: `tx_insufficient_balance` on a send the user could
+        // afford, caused by a fee they never asked for, is the worst outcome
+        // available. Unaffordable means no fee, not a blocked payment.
+        const feeAsset = selectedAsset?.issuer ? selectedAsset.code : 'XLM'
+        const platformFee = await fetchPlatformFee(feeAsset, Number(amount))
+        if (platformFee) {
+          const held = account.balances.find((b) =>
+            platformFee.assetIssuer === null
+              ? b.asset_type === 'native'
+              : 'asset_code' in b
+                && b.asset_code === platformFee.assetCode
+                && 'asset_issuer' in b
+                && b.asset_issuer === platformFee.assetIssuer,
+          )
+          // XLM is not spendable down to zero: the network locks 1 XLM for the
+          // account plus 0.5 for every trustline it holds, and a transaction
+          // that would breach that is rejected outright with
+          // `tx_insufficient_balance`. Comparing against the raw balance is how
+          // a fee nobody asked for kills the payment they did — exactly what
+          // the note above says must not happen. Issued assets have no reserve,
+          // so for those the balance is the balance.
+          const available = platformFee.assetIssuer === null
+            ? Number(spendableNativeXlm(account))
+            : held ? Number(held.balance) : 0
+          if (available >= Number(amount) + Number(platformFee.amount)) {
+            builder.addOperation(Operation.payment({
+              destination: platformFee.destination,
+              asset: platformFee.assetIssuer
+                ? new Asset(platformFee.assetCode, platformFee.assetIssuer)
+                : Asset.native(),
+              amount: platformFee.amount,
+            }))
+          }
+        }
+
         const tx = builder.build()
         tx.sign(feePayerKp)
         const result = await horizonServer.submitTransaction(tx)
@@ -384,7 +491,7 @@ export default function SendPage() {
           .addOperation(sacContract.call(
             'transfer',
             nativeToScVal(feePayerKp.publicKey(), { type: 'address' }),
-            nativeToScVal(recipient,              { type: 'address' }),
+            nativeToScVal(destination,            { type: 'address' }),
             nativeToScVal(amountStroops,          { type: 'i128' }),
           ))
           .setTimeout(30)
@@ -416,7 +523,17 @@ export default function SendPage() {
 
       setStep('done')
     } catch (err: unknown) {
-      setErrorMsg(passkeyErrorMessage(err))
+      // Closing the passkey sheet (or letting it time out) puts the user back
+      // on the form with their details intact. Nothing was submitted.
+      if (isPasskeyCancellation(err)) {
+        setErrorMsg(null)
+        setStep('form')
+        return
+      }
+      // Horizon first: it rejects every failed transaction with a 400, so the
+      // only thing `passkeyErrorMessage` could say about one was "Request
+      // failed with status code 400". The reason is in the response body.
+      setErrorMsg(horizonErrorMessage(err) ?? passkeyErrorMessage(err))
       setStep('error')
     } finally {
       endTx()
@@ -506,7 +623,9 @@ export default function SendPage() {
                       <span style={{ fontSize: 15, fontWeight: 600 }}>{selectedAsset?.code ?? '—'}</span>
                       <span className="vw-meta">
                         {selectedAsset
-                          ? `${parseFloat(selectedAsset.balance).toFixed(4)} available${selectedAsset.issuer ? ` · ${shortIssuer(selectedAsset.issuer)}` : ''}`
+                          // "Available" said the balance, which for XLM is not
+                          // available: part of it is locked as the reserve.
+                          ? `${maxSendable(selectedAsset).toFixed(4)} available${selectedAsset.issuer ? ` · ${shortIssuer(selectedAsset.issuer)}` : ''}`
                           : 'Loading…'}
                       </span>
                     </span>
@@ -561,6 +680,11 @@ export default function SendPage() {
                 <div className="vw-amountfoot">
                   <span className="vw-amountbal">
                     {selectedAsset ? `Balance ${parseFloat(selectedAsset.balance).toFixed(2)} ${selectedAsset.code}` : ''}
+                    {selectedAsset && parseFloat(selectedAsset.balance) - maxSendable(selectedAsset) > 0.00001
+                      // Naming the locked part, because otherwise the two
+                      // numbers on this screen simply disagree.
+                      ? ` · ${(parseFloat(selectedAsset.balance) - maxSendable(selectedAsset)).toFixed(2)} reserved`
+                      : ''}
                   </span>
                   <span className="vw-chips">
                     {[0.25, 0.5, 0.75].map((f) => (
@@ -570,7 +694,10 @@ export default function SendPage() {
                         className="vw-amountchip"
                         onClick={() => {
                           if (!selectedAsset) return
-                          const bal = parseFloat(selectedAsset.balance)
+                          // A share of what can be sent, not a share of what
+                          // is held: 75% of a balance that is 70% reserve is a
+                          // transaction the network refuses.
+                          const bal = maxSendable(selectedAsset)
                           if (!Number.isFinite(bal)) return
                           setAmount((Math.floor(bal * f * 1e7) / 1e7).toString())
                         }}
@@ -670,6 +797,19 @@ export default function SendPage() {
                   }}
                 />
               </div>
+              {isResolvingName && (
+                <p className="vw-meta" style={{ marginTop: '6px' }}>Resolving federation address…</p>
+              )}
+              {resolvedAddress && (
+                <p className="vw-meta" style={{ marginTop: '6px', color: 'var(--teal)' }}>
+                  ✓ Resolves to: {resolvedAddress.slice(0, 8)}…{resolvedAddress.slice(-8)}
+                </p>
+              )}
+              {nameResolutionError && (
+                <p className="vw-meta" style={{ marginTop: '6px', color: 'var(--coral)' }}>
+                  ⚠ {nameResolutionError}
+                </p>
+              )}
               {imgError && (
                 <p style={{ fontSize: '0.75rem', color: 'var(--teal)', marginTop: '0.375rem', lineHeight: 1.4 }}>
                   {imgError}
@@ -686,10 +826,16 @@ export default function SendPage() {
                 placeholder="Add a note for the recipient"
                 value={memo}
                 onChange={e => setMemo(e.target.value)}
+                aria-invalid={memoFieldError ? true : undefined}
+                aria-describedby={memoFieldError ? 'send-memo-error' : undefined}
               />
-              {memo && validateMemo(memo, memoType) && (
-                <p style={{ fontSize: '0.75rem', color: '#e5484d', marginTop: '0.375rem', lineHeight: 1.4 }}>
-                  {validateMemo(memo, memoType)}
+              {memoFieldError && (
+                <p
+                  id="send-memo-error"
+                  role="alert"
+                  style={{ fontSize: '0.75rem', color: '#e5484d', marginTop: '0.375rem', lineHeight: 1.4 }}
+                >
+                  {memoFieldError}
                 </p>
               )}
             </div>
@@ -760,7 +906,10 @@ export default function SendPage() {
           <div className="vw-send-stage" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
             <div className="card">
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <Row label="To"      value={`${recipient.slice(0, 8)}...${recipient.slice(-8)}`} mono />
+                <Row label="To"      value={recipient.includes('*') ? recipient : `${recipient.slice(0, 8)}...${recipient.slice(-8)}`} mono />
+                {resolvedAddress && (
+                  <Row label="Resolved Address" value={`${resolvedAddress.slice(0, 8)}...${resolvedAddress.slice(-8)}`} mono />
+                )}
                 <Row label="Amount"  value={`${amount} ${selectedAsset?.code ?? 'XLM'}`} mono />
                 {selectedAsset?.issuer && (
                   <Row

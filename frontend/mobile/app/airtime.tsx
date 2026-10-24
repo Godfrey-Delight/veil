@@ -60,9 +60,9 @@ import { errorMessage } from '../lib/errorMessage';
 import { getAssetIssuer } from '../lib/assets';
 import { getFeePayerAddress } from '../lib/activity';
 import { NotEnoughToSend, previewSpendFee, spendAsset } from '../lib/spendAsset';
+import { isPasskeyCancellation } from '../lib/passkeyOutcome';
 import type { PlatformFee } from '../lib/platformFee';
 import {
-  classifyBillStatus,
   getBillStatus,
   getCustomerRef,
   isNairaVerified,
@@ -70,11 +70,9 @@ import {
   payBill,
   type NairaCoin,
 } from '../lib/onramp';
+import { classifyBillPollStatus } from '../lib/billFlow';
 
-type Step = 'form' | 'confirm' | 'paying' | 'unconfirmed' | 'done' | 'failed';
-
-export const MAX_CONSECUTIVE_POLL_ERRORS = 3;
-export const MAX_POLL_ATTEMPTS = 12;
+type Step = 'form' | 'confirm' | 'paying' | 'done' | 'failed';
 
 const QUICK_AMOUNTS = [200, 500, 1000, 2000];
 
@@ -142,20 +140,8 @@ export default function AirtimeScreen() {
   const [veilFee, setVeilFee] = useState<PlatformFee | null>(null);
   const [spent, setSpent] = useState<number | null>(null);
   const [waitingForPasskey, setWaitingForPasskey] = useState(false);
-  const [pollErrorCount, setPollErrorCount] = useState(0);
-  const [unconfirmedReason, setUnconfirmedReason] = useState<'errors' | 'timeout'>('timeout');
-  const [checkingAgain, setCheckingAgain] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-  }, []);
 
   const detected = detectNetwork(phone);
   // A detected network wins until the user overrides it. Ported numbers are why
@@ -203,81 +189,32 @@ export default function AirtimeScreen() {
   // not — so asking is the only way to know.
   useEffect(() => {
     if (!orderId || !customerRef || step !== 'paying' || !payHash) return;
-    let stopped = false;
-    let checking = false;
-    let attempts = 0;
-    let consecutiveErrors = 0;
-
-    const stopPolling = () => {
-      stopped = true;
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-      }
-      pollRef.current = null;
-    };
-
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-
     const check = async () => {
-      if (stopped || checking) return;
-      checking = true;
-      attempts += 1;
       try {
         const s = await getBillStatus(customerRef, orderId);
-        if (stopped) return;
-        consecutiveErrors = 0;
-        setPollErrorCount(0);
-        const status = classifyBillStatus(s.status);
-        if (status === 'done' || status === 'failed') {
-          stopPolling();
-          setStep(status);
-        } else if (attempts >= MAX_POLL_ATTEMPTS) {
-          stopPolling();
-          setUnconfirmedReason('timeout');
-          setStep('unconfirmed');
-        }
+        // One classifier for every bill screen. This used to be an inline
+        // regex that did not know "settled"/"disbursed" — the words Linq
+        // actually ends a vend with — so a delivered top-up never left this
+        // screen.
+        const outcome = classifyBillPollStatus(s.status);
+        if (outcome === 'done') setStep('done');
+        if (outcome === 'failed') setStep('failed');
       } catch (err) {
-        if (stopped) return;
+        // Silent *to the user*: a failed poll is nothing they can act on, and
+        // the payment has already left, so an error here would read as if it
+        // had not. But silent to us as well is how a top-up that landed sat on
+        // a spinner with no way to find out why — the status was fine, the
+        // request never got there, and nothing anywhere said so.
         console.warn('[airtime] status poll failed:', errorMessage(err));
-        consecutiveErrors += 1;
-        setPollErrorCount(consecutiveErrors);
-        if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS || attempts >= MAX_POLL_ATTEMPTS) {
-          stopPolling();
-          setUnconfirmedReason('errors');
-          setStep('unconfirmed');
-        }
-      } finally {
-        checking = false;
       }
     };
-
     void check();
     pollRef.current = setInterval(check, 10_000);
     return () => {
-      stopPolling();
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
     };
   }, [orderId, customerRef, step, payHash]);
-
-  const checkStatusAgain = useCallback(async () => {
-    if (!orderId || !customerRef || checkingAgain) return;
-    setCheckingAgain(true);
-    try {
-      const status = classifyBillStatus((await getBillStatus(customerRef, orderId)).status);
-      if (status === 'done' || status === 'failed') {
-        setStep(status);
-      } else {
-        setUnconfirmedReason('timeout');
-      }
-    } catch (err) {
-      console.warn('[airtime] manual status check failed:', errorMessage(err));
-      setUnconfirmedReason('errors');
-    } finally {
-      setCheckingAgain(false);
-    }
-  }, [orderId, customerRef, checkingAgain]);
 
   const ngn = Number(amountNGN.replace(/[^\d]/g, '')) || 0;
   const code = coin.toUpperCase();
@@ -344,8 +281,6 @@ export default function AirtimeScreen() {
     if (!customerRef || !refundAddress || !rate) return;
     setStep('paying');
     setError(null);
-    setPollErrorCount(0);
-    setUnconfirmedReason('timeout');
     try {
       // Reserve first, spend second. A reservation that fails costs nothing;
       // a spend with no order behind it is money sent to an address that was
@@ -379,6 +314,13 @@ export default function AirtimeScreen() {
       setPayHash(hash);
     } catch (err) {
       setWaitingForPasskey(false);
+      // Back to the confirmation with the order intact and no red error: the
+      // user simply chose not to authorise, and no crypto left the wallet.
+      if (isPasskeyCancellation(err)) {
+        setError(null);
+        setStep('confirm');
+        return;
+      }
       if (err instanceof NotEnoughToSend) {
         setError(
           `This wallet holds ${err.available.toLocaleString('en-US', { maximumFractionDigits: 7 })} ${code}, less than this top-up needs.`,
@@ -460,7 +402,6 @@ export default function AirtimeScreen() {
               <Text style={styles.label}>PHONE NUMBER</Text>
               <View style={styles.phoneRow}>
                 <TextInput
-                  testID="airtime-phone-input"
                   style={styles.phoneInput}
                   value={phone}
                   onChangeText={(t) => setPhone(t.replace(/[^\d]/g, '').slice(0, 11))}
@@ -497,7 +438,6 @@ export default function AirtimeScreen() {
             <View style={styles.amountRow}>
               <Text style={styles.currency}>₦</Text>
               <TextInput
-                testID="airtime-amount-input"
                 style={styles.amountInput}
                 value={amountNGN}
                 onChangeText={(t) => setAmountNGN(t.replace(/[^\d]/g, ''))}
@@ -547,7 +487,6 @@ export default function AirtimeScreen() {
             </View>
 
             <Pressable
-              testID="airtime-continue-btn"
               onPress={() => void continueFromForm()}
               disabled={!phoneValid || ngn <= 0 || rateState !== 'ready'}
               style={({ pressed }) => [
@@ -647,48 +586,16 @@ export default function AirtimeScreen() {
 
             <View style={styles.waitRow}>
               <ActivityIndicator color={colors.accent} />
-              <Text testID="airtime-wait-text" style={styles.hint}>
-                {waitingForPasskey
-                  ? 'Waiting for your passkey…'
-                  : pollErrorCount > 0
-                    ? `Checking status failed — retrying (${pollErrorCount}/${MAX_CONSECUTIVE_POLL_ERRORS})`
-                    : 'Waiting for the top-up…'}
+              <Text style={styles.hint}>
+                {waitingForPasskey ? 'Waiting for your passkey…' : 'Waiting for the top-up…'}
               </Text>
             </View>
           </>
         )}
 
-        {!mainnetOnly && step === 'unconfirmed' && (
-          <View testID="airtime-unconfirmed-screen" style={styles.card}>
-            <Text style={styles.question}>
-              {unconfirmedReason === 'errors'
-                ? "Couldn't confirm status"
-                : 'Delivery taking longer than usual'}
-            </Text>
-            <Text style={styles.hint}>
-              {unconfirmedReason === 'errors'
-                ? `Checking status failed after ${MAX_CONSECUTIVE_POLL_ERRORS} attempts.`
-                : 'Delivery taking longer than usual.'}{' '}
-              Your top-up may already have arrived. Your payment left this wallet. Check the
-              recipient before trying again.
-            </Text>
-            <Pressable
-              testID="airtime-check-again-btn"
-              accessibilityRole="button"
-              disabled={checkingAgain}
-              onPress={() => void checkStatusAgain()}
-              style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
-            >
-              <Text style={styles.secondaryText}>
-                {checkingAgain ? 'Checking status…' : 'Check status again'}
-              </Text>
-            </Pressable>
-          </View>
-        )}
-
         {/* ── b4 · done ─────────────────────────────────────────────────── */}
         {!mainnetOnly && step === 'done' && (
-          <View testID="airtime-done-screen">
+          <>
             <View style={styles.card}>
               <Text style={styles.question}>Airtime sent</Text>
               <Text style={styles.hint}>
@@ -734,12 +641,12 @@ export default function AirtimeScreen() {
             >
               <Text style={styles.secondaryText}>Done</Text>
             </Pressable>
-          </View>
+          </>
         )}
 
         {/* ── b5 · failed, refunding ────────────────────────────────────── */}
         {!mainnetOnly && step === 'failed' && (
-          <View testID="airtime-failed-screen">
+          <>
             <View style={styles.card}>
               <Text style={styles.question}>Payment failed</Text>
               <Text style={styles.hint}>
@@ -784,7 +691,7 @@ export default function AirtimeScreen() {
             {orderId ? (
               <Text style={styles.centeredHint}>Ref {orderId.slice(0, 8).toUpperCase()}</Text>
             ) : null}
-          </View>
+          </>
         )}
         </ScrollView>
       </KeyboardAvoidingView>
